@@ -18,7 +18,6 @@ package hetzner
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"sync"
 	"time"
@@ -131,12 +130,13 @@ func (m *serversCache) getServer(nodeIdOrName string) (*hcloud.Server, error) {
 	}
 
 	for _, server := range servers {
-		if server.Name == nodeIdOrName || strconv.Itoa(server.ID) == nodeIdOrName {
+		if server.Name == nodeIdOrName || strconv.FormatInt(server.ID, 10) == nodeIdOrName {
 			return server, nil
 		}
 	}
 
-	return nil, errors.New("server not found")
+	// return nil if server not found
+	return nil, nil
 }
 
 func (m *serversCache) getServersByNodeGroupName(nodeGroup string) ([]*hcloud.Server, error) {

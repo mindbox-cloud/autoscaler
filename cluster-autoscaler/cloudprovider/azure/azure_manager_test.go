@@ -25,7 +25,7 @@ import (
 
 	"sigs.k8s.io/cloud-provider-azure/pkg/azureclients/vmclient/mockvmclient"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-03-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2022-08-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2017-05-10/resources"
 	"github.com/Azure/go-autorest/autorest/date"
 	"github.com/Azure/go-autorest/autorest/to"
@@ -144,6 +144,7 @@ func TestCreateAzureManagerValidConfig(t *testing.T) {
 	mockVMClient := mockvmclient.NewMockInterface(ctrl)
 	mockVMSSClient := mockvmssclient.NewMockInterface(ctrl)
 	mockVMSSClient.EXPECT().List(gomock.Any(), "fakeId").Return([]compute.VirtualMachineScaleSet{}, nil).Times(2)
+	mockVMClient.EXPECT().List(gomock.Any(), "fakeId").Return([]compute.VirtualMachine{}, nil).Times(2)
 	mockAzClient := &azClient{
 		virtualMachinesClient:         mockVMClient,
 		virtualMachineScaleSetsClient: mockVMSSClient,
@@ -226,6 +227,7 @@ func TestCreateAzureManagerValidConfigForStandardVMType(t *testing.T) {
 	mockVMClient := mockvmclient.NewMockInterface(ctrl)
 	mockVMClient.EXPECT().List(gomock.Any(), "fakeId").Return([]compute.VirtualMachine{}, nil).Times(2)
 	mockVMSSClient := mockvmssclient.NewMockInterface(ctrl)
+	mockVMSSClient.EXPECT().List(gomock.Any(), "fakeId").Return([]compute.VirtualMachineScaleSet{}, nil).Times(2)
 	mockAzClient := &azClient{
 		virtualMachinesClient:         mockVMClient,
 		virtualMachineScaleSetsClient: mockVMSSClient,
@@ -338,6 +340,7 @@ func TestCreateAzureManagerWithNilConfig(t *testing.T) {
 	mockVMClient := mockvmclient.NewMockInterface(ctrl)
 	mockVMSSClient := mockvmssclient.NewMockInterface(ctrl)
 	mockVMSSClient.EXPECT().List(gomock.Any(), "resourceGroup").Return([]compute.VirtualMachineScaleSet{}, nil).AnyTimes()
+	mockVMClient.EXPECT().List(gomock.Any(), "resourceGroup").Return([]compute.VirtualMachine{}, nil).AnyTimes()
 	mockAzClient := &azClient{
 		virtualMachinesClient:         mockVMClient,
 		virtualMachineScaleSetsClient: mockVMSSClient,
@@ -349,19 +352,21 @@ func TestCreateAzureManagerWithNilConfig(t *testing.T) {
 		TenantID:                     "tenantId",
 		SubscriptionID:               "subscriptionId",
 		ResourceGroup:                "resourceGroup",
+		ClusterName:                  "mycluster",
+		ClusterResourceGroup:         "myrg",
+		ARMBaseURLForAPClient:        "nodeprovisioner-svc.nodeprovisioner.svc.cluster.local",
 		VMType:                       "vmss",
 		AADClientID:                  "aadClientId",
 		AADClientSecret:              "aadClientSecret",
 		AADClientCertPath:            "aadClientCertPath",
 		AADClientCertPassword:        "aadClientCertPassword",
 		Deployment:                   "deployment",
-		ClusterName:                  "clusterName",
-		NodeResourceGroup:            "resourcegroup",
 		UseManagedIdentityExtension:  true,
 		UserAssignedIdentityID:       "UserAssignedIdentityID",
 		VmssCacheTTL:                 100,
 		VmssVmsCacheTTL:              110,
 		VmssVmsCacheJitter:           90,
+		GetVmssSizeRefreshPeriod:     30,
 		MaxDeploymentsCount:          8,
 		CloudProviderBackoff:         true,
 		CloudProviderBackoffRetries:  1,
@@ -423,17 +428,19 @@ func TestCreateAzureManagerWithNilConfig(t *testing.T) {
 
 	t.Setenv("ARM_CLOUD", "AzurePublicCloud")
 	t.Setenv("LOCATION", "southeastasia")
+	t.Setenv("AZURE_TENANT_ID", "tenantId")
+	t.Setenv("AZURE_CLIENT_ID", "aadClientId")
 	t.Setenv("ARM_SUBSCRIPTION_ID", "subscriptionId")
 	t.Setenv("ARM_RESOURCE_GROUP", "resourceGroup")
+	t.Setenv("AZURE_TENANT_ID", "tenantId")
 	t.Setenv("ARM_TENANT_ID", "tenantId")
+	t.Setenv("AZURE_CLIENT_ID", "aadClientId")
 	t.Setenv("ARM_CLIENT_ID", "aadClientId")
 	t.Setenv("ARM_CLIENT_SECRET", "aadClientSecret")
 	t.Setenv("ARM_VM_TYPE", "vmss")
 	t.Setenv("ARM_CLIENT_CERT_PATH", "aadClientCertPath")
 	t.Setenv("ARM_CLIENT_CERT_PASSWORD", "aadClientCertPassword")
 	t.Setenv("ARM_DEPLOYMENT", "deployment")
-	t.Setenv("AZURE_CLUSTER_NAME", "clusterName")
-	t.Setenv("AZURE_NODE_RESOURCE_GROUP", "resourcegroup")
 	t.Setenv("ARM_USE_MANAGED_IDENTITY_EXTENSION", "true")
 	t.Setenv("ARM_USER_ASSIGNED_IDENTITY_ID", "UserAssignedIdentityID")
 	t.Setenv("AZURE_VMSS_CACHE_TTL", "100")
@@ -446,10 +453,15 @@ func TestCreateAzureManagerWithNilConfig(t *testing.T) {
 	t.Setenv("BACKOFF_DURATION", "1")
 	t.Setenv("BACKOFF_JITTER", "1")
 	t.Setenv("CLOUD_PROVIDER_RATE_LIMIT", "true")
+	t.Setenv("CLUSTER_NAME", "mycluster")
+	t.Setenv("ARM_CLUSTER_RESOURCE_GROUP", "myrg")
+	t.Setenv("ARM_BASE_URL_FOR_AP_CLIENT", "nodeprovisioner-svc.nodeprovisioner.svc.cluster.local")
 
 	t.Run("environment variables correctly set", func(t *testing.T) {
 		manager, err := createAzureManagerInternal(nil, cloudprovider.NodeGroupDiscoveryOptions{}, mockAzClient)
 		assert.NoError(t, err)
+		manager.config.TenantID = "tenantId"
+		manager.config.AADClientID = "aadClientId"
 		assert.Equal(t, true, reflect.DeepEqual(*expectedConfig, *manager.config), "unexpected azure manager configuration")
 	})
 
@@ -465,6 +477,14 @@ func TestCreateAzureManagerWithNilConfig(t *testing.T) {
 		t.Setenv("AZURE_VMSS_CACHE_TTL", "invalidint")
 		manager, err := createAzureManagerInternal(nil, cloudprovider.NodeGroupDiscoveryOptions{}, mockAzClient)
 		expectedErr := fmt.Errorf("failed to parse AZURE_VMSS_CACHE_TTL \"invalidint\": strconv.ParseInt: parsing \"invalidint\": invalid syntax")
+		assert.Nil(t, manager)
+		assert.Equal(t, expectedErr, err, "Return err does not match, expected: %v, actual: %v", expectedErr, err)
+	})
+
+	t.Run("invalid int for AZURE_GET_VMSS_SIZE_REFRESH_PERIOD", func(t *testing.T) {
+		t.Setenv("AZURE_GET_VMSS_SIZE_REFRESH_PERIOD", "invalidint")
+		manager, err := createAzureManagerInternal(nil, cloudprovider.NodeGroupDiscoveryOptions{}, mockAzClient)
+		expectedErr := fmt.Errorf("failed to parse AZURE_GET_VMSS_SIZE_REFRESH_PERIOD \"invalidint\": strconv.Atoi: parsing \"invalidint\": invalid syntax")
 		assert.Nil(t, manager)
 		assert.Equal(t, expectedErr, err, "Return err does not match, expected: %v, actual: %v", expectedErr, err)
 	})
@@ -674,12 +694,62 @@ func TestGetFilteredAutoscalingGroupsVmss(t *testing.T) {
 		azureRef: azureRef{
 			Name: vmssName,
 		},
-		minSize:                minVal,
-		maxSize:                maxVal,
-		manager:                manager,
-		curSize:                3,
-		sizeRefreshPeriod:      manager.azureCache.refreshInterval,
-		instancesRefreshPeriod: defaultVmssInstancesRefreshPeriod,
+		minSize:                  minVal,
+		maxSize:                  maxVal,
+		manager:                  manager,
+		enableForceDelete:        manager.config.EnableForceDelete,
+		curSize:                  3,
+		sizeRefreshPeriod:        manager.azureCache.refreshInterval,
+		instancesRefreshPeriod:   defaultVmssInstancesRefreshPeriod,
+		getVmssSizeRefreshPeriod: time.Duration(VmssSizeRefreshPeriodDefault) * time.Second,
+	}}
+	assert.True(t, assert.ObjectsAreEqualValues(expectedAsgs, asgs), "expected %#v, but found: %#v", expectedAsgs, asgs)
+}
+
+func TestGetFilteredAutoscalingGroupsVmssWithConfiguredSizes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	vmssName := "test-vmss"
+	vmssTag := "fake-tag"
+	vmssTagValue := "fake-value"
+	vmssTag2 := "fake-tag2"
+	vmssTagValue2 := "fake-value2"
+	minVal := 2
+	maxVal := 4
+
+	ngdo := cloudprovider.NodeGroupDiscoveryOptions{
+		NodeGroupAutoDiscoverySpecs: []string{
+			fmt.Sprintf("label:%s=%s,min=2,max=5", vmssTag, vmssTagValue),
+			fmt.Sprintf("label:%s=%s,min=1,max=4", vmssTag2, vmssTagValue2),
+		},
+	}
+
+	manager := newTestAzureManager(t)
+	expectedScaleSets := []compute.VirtualMachineScaleSet{fakeVMSSWithTags(vmssName, map[string]*string{vmssTag: &vmssTagValue, vmssTag2: &vmssTagValue2})}
+	mockVMSSClient := mockvmssclient.NewMockInterface(ctrl)
+	mockVMSSClient.EXPECT().List(gomock.Any(), manager.config.ResourceGroup).Return(expectedScaleSets, nil).AnyTimes()
+	manager.azClient.virtualMachineScaleSetsClient = mockVMSSClient
+	err := manager.forceRefresh()
+	assert.NoError(t, err)
+
+	specs, err := ParseLabelAutoDiscoverySpecs(ngdo)
+	assert.NoError(t, err)
+
+	asgs, err := manager.getFilteredNodeGroups(specs)
+	assert.NoError(t, err)
+	expectedAsgs := []cloudprovider.NodeGroup{&ScaleSet{
+		azureRef: azureRef{
+			Name: vmssName,
+		},
+		minSize:                  minVal,
+		maxSize:                  maxVal,
+		manager:                  manager,
+		enableForceDelete:        manager.config.EnableForceDelete,
+		curSize:                  3,
+		sizeRefreshPeriod:        manager.azureCache.refreshInterval,
+		instancesRefreshPeriod:   defaultVmssInstancesRefreshPeriod,
+		getVmssSizeRefreshPeriod: time.Duration(VmssSizeRefreshPeriodDefault) * time.Second,
 	}}
 	assert.True(t, assert.ObjectsAreEqualValues(expectedAsgs, asgs), "expected %#v, but found: %#v", expectedAsgs, asgs)
 }
@@ -697,19 +767,13 @@ func TestGetFilteredAutoscalingGroupsWithInvalidVMType(t *testing.T) {
 	mockVMSSClient := mockvmssclient.NewMockInterface(ctrl)
 	mockVMSSClient.EXPECT().List(gomock.Any(), manager.config.ResourceGroup).Return(expectedScaleSets, nil).AnyTimes()
 	manager.azClient.virtualMachineScaleSetsClient = mockVMSSClient
-	manager.config.VMType = vmTypeAKS
 
+	manager.config.VMType = "invalidVMType"
 	specs, err := ParseLabelAutoDiscoverySpecs(ngdo)
 	assert.NoError(t, err)
 
-	expectedErr := fmt.Errorf("vmType \"aks\" does not support autodiscovery")
+	expectedErr := fmt.Errorf("vmType \"invalidVMType\" does not support autodiscovery")
 	asgs, err2 := manager.getFilteredNodeGroups(specs)
-	assert.Nil(t, asgs)
-	assert.Equal(t, expectedErr, err2, "Not match, expected: %v, actual: %v", expectedErr, err2)
-
-	manager.config.VMType = "invalidVMType"
-	expectedErr = fmt.Errorf("vmType \"invalidVMType\" does not support autodiscovery")
-	asgs, err2 = manager.getFilteredNodeGroups(specs)
 	assert.Nil(t, asgs)
 	assert.Equal(t, expectedErr, err2, "Not match, expected: %v, actual: %v", expectedErr, err2)
 }
@@ -740,6 +804,9 @@ func TestFetchAutoAsgsVmss(t *testing.T) {
 	mockVMSSVMClient := mockvmssvmclient.NewMockInterface(ctrl)
 	mockVMSSVMClient.EXPECT().List(gomock.Any(), manager.config.ResourceGroup, vmssName, gomock.Any()).Return(expectedVMSSVMs, nil).AnyTimes()
 	manager.azClient.virtualMachineScaleSetVMsClient = mockVMSSVMClient
+	mockVMClient := mockvmclient.NewMockInterface(ctrl)
+	manager.azClient.virtualMachinesClient = mockVMClient
+	mockVMClient.EXPECT().List(gomock.Any(), manager.config.ResourceGroup).Return([]compute.VirtualMachine{}, nil).AnyTimes()
 	err := manager.forceRefresh()
 	assert.NoError(t, err)
 
