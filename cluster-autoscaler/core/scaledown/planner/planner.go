@@ -18,14 +18,16 @@ package planner
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	apiv1 "k8s.io/api/core/v1"
-	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/eligibility"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/pdb"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/resource"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/unneeded"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/unremovable"
@@ -33,6 +35,8 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodes"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/options"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/utilization"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
@@ -46,7 +50,7 @@ type eligibilityChecker interface {
 
 type removalSimulator interface {
 	DropOldHints()
-	SimulateNodeRemoval(node string, podDestinations map[string]bool, timestamp time.Time, pdbs []*policyv1.PodDisruptionBudget) (*simulator.NodeToBeRemoved, *simulator.UnremovableNode)
+	SimulateNodeRemoval(node string, podDestinations map[string]bool, timestamp time.Time, remainingPdbTracker pdb.RemainingPdbTracker) (*simulator.NodeToBeRemoved, *simulator.UnremovableNode)
 }
 
 // controllerReplicasCalculator calculates a number of target and expected replicas for a given controller.
@@ -76,7 +80,7 @@ type Planner struct {
 }
 
 // New creates a new Planner object.
-func New(context *context.AutoscalingContext, processors *processors.AutoscalingProcessors, deleteOptions simulator.NodeDeleteOptions) *Planner {
+func New(context *context.AutoscalingContext, processors *processors.AutoscalingProcessors, deleteOptions options.NodeDeleteOptions, drainabilityRules rules.Rules) *Planner {
 	resourceLimitsFinder := resource.NewLimitsFinder(processors.CustomResourcesProcessor)
 	minUpdateInterval := context.AutoscalingOptions.NodeGroupDefaults.ScaleDownUnneededTime
 	if minUpdateInterval == 0*time.Nanosecond {
@@ -86,7 +90,7 @@ func New(context *context.AutoscalingContext, processors *processors.Autoscaling
 		context:               context,
 		unremovableNodes:      unremovable.NewNodes(),
 		unneededNodes:         unneeded.NewNodes(processors.NodeGroupConfigProcessor, resourceLimitsFinder),
-		rs:                    simulator.NewRemovalSimulator(context.ListerRegistry, context.ClusterSnapshot, context.PredicateChecker, simulator.NewUsageTracker(), deleteOptions, true),
+		rs:                    simulator.NewRemovalSimulator(context.ListerRegistry, context.ClusterSnapshot, context.PredicateChecker, simulator.NewUsageTracker(), deleteOptions, drainabilityRules, true),
 		actuationInjector:     scheduling.NewHintingSimulator(context.PredicateChecker),
 		eligibilityChecker:    eligibility.NewChecker(processors.NodeGroupConfigProcessor),
 		nodeUtilizationMap:    make(map[string]utilization.Info),
@@ -132,6 +136,7 @@ func (p *Planner) CleanUpUnneededNodes() {
 // NodesToDelete returns all Nodes that could be removed right now, according
 // to the Planner.
 func (p *Planner) NodesToDelete(_ time.Time) (empty, needDrain []*apiv1.Node) {
+	empty, needDrain = []*apiv1.Node{}, []*apiv1.Node{}
 	nodes, err := allNodes(p.context.ClusterSnapshot)
 	if err != nil {
 		klog.Errorf("Nothing will scale down, failed to list nodes from ClusterSnapshot: %v", err)
@@ -154,7 +159,10 @@ func (p *Planner) NodesToDelete(_ time.Time) (empty, needDrain []*apiv1.Node) {
 		// downs already in progress. If we pass the empty nodes first, they will be first
 		// to get deleted, thus we decrease chances of hitting the limit on non-empty scale down.
 		append(emptyRemovable, needDrainRemovable...),
-		p.context.AutoscalingOptions.MaxScaleDownParallelism)
+		// No need to limit the number of nodes, since it will happen later, in the actuation stage.
+		// It will make a more appropriate decision by using additional information about deletions
+		// in progress.
+		math.MaxInt)
 	for _, nodeToRemove := range nodesToRemove {
 		if len(nodeToRemove.PodsToReschedule) > 0 {
 			needDrain = append(needDrain, nodeToRemove.Node)
@@ -162,6 +170,7 @@ func (p *Planner) NodesToDelete(_ time.Time) (empty, needDrain []*apiv1.Node) {
 			empty = append(empty, nodeToRemove.Node)
 		}
 	}
+
 	return empty, needDrain
 }
 
@@ -253,6 +262,7 @@ func (p *Planner) categorizeNodes(podDestinations map[string]bool, scaleDownCand
 	unremovableTimeout := p.latestUpdate.Add(p.context.AutoscalingOptions.UnremovableNodeRecheckTimeout)
 	unremovableCount := 0
 	var removableList []simulator.NodeToBeRemoved
+	atomicScaleDownNodesCount := 0
 	p.unremovableNodes.Update(p.context.ClusterSnapshot.NodeInfos(), p.latestUpdate)
 	currentlyUnneededNodeNames, utilizationMap, ineligible := p.eligibilityChecker.FilterOutUnremovable(p.context, scaleDownCandidates, p.latestUpdate, p.unremovableNodes)
 	for _, n := range ineligible {
@@ -266,11 +276,11 @@ func (p *Planner) categorizeNodes(podDestinations map[string]bool, scaleDownCand
 			klog.Warningf("%d out of %d nodes skipped in scale down simulation due to timeout.", len(currentlyUnneededNodeNames)-i, len(currentlyUnneededNodeNames))
 			break
 		}
-		if len(removableList) >= p.unneededNodesLimit() {
-			klog.V(4).Infof("%d out of %d nodes skipped in scale down simulation: there are already %d unneeded nodes so no point in looking for more.", len(currentlyUnneededNodeNames)-i, len(currentlyUnneededNodeNames), len(removableList))
+		if len(removableList)-atomicScaleDownNodesCount >= p.unneededNodesLimit() {
+			klog.V(4).Infof("%d out of %d nodes skipped in scale down simulation: there are already %d unneeded nodes so no point in looking for more. Total atomic scale down nodes: %d", len(currentlyUnneededNodeNames)-i, len(currentlyUnneededNodeNames), len(removableList), atomicScaleDownNodesCount)
 			break
 		}
-		removable, unremovable := p.rs.SimulateNodeRemoval(node, podDestinations, p.latestUpdate, p.context.RemainingPdbTracker.GetPdbs())
+		removable, unremovable := p.rs.SimulateNodeRemoval(node, podDestinations, p.latestUpdate, p.context.RemainingPdbTracker)
 		if removable != nil {
 			_, inParallel, _ := p.context.RemainingPdbTracker.CanRemovePods(removable.PodsToReschedule)
 			if !inParallel {
@@ -279,6 +289,10 @@ func (p *Planner) categorizeNodes(podDestinations map[string]bool, scaleDownCand
 			delete(podDestinations, removable.Node.Name)
 			p.context.RemainingPdbTracker.RemovePods(removable.PodsToReschedule)
 			removableList = append(removableList, *removable)
+			if p.atomicScaleDownNode(removable) {
+				atomicScaleDownNodesCount++
+				klog.V(2).Infof("Considering node %s for atomic scale down. Total atomic scale down nodes count: %d", removable.Node.Name, atomicScaleDownNodesCount)
+			}
 		}
 		if unremovable != nil {
 			unremovableCount += 1
@@ -289,6 +303,24 @@ func (p *Planner) categorizeNodes(podDestinations map[string]bool, scaleDownCand
 	if unremovableCount > 0 {
 		klog.V(1).Infof("%v nodes found to be unremovable in simulation, will re-check them at %v", unremovableCount, unremovableTimeout)
 	}
+}
+
+// atomicScaleDownNode checks if the removable node would be considered for atomic scale down.
+func (p *Planner) atomicScaleDownNode(node *simulator.NodeToBeRemoved) bool {
+	nodeGroup, err := p.context.CloudProvider.NodeGroupForNode(node.Node)
+	if err != nil {
+		klog.Errorf("failed to get node info for %v: %s", node.Node.Name, err)
+		return false
+	}
+	autoscalingOptions, err := nodeGroup.GetOptions(p.context.NodeGroupDefaults)
+	if err != nil && err != cloudprovider.ErrNotImplemented {
+		klog.Errorf("Failed to get autoscaling options for node group %s: %v", nodeGroup.Id(), err)
+		return false
+	}
+	if autoscalingOptions != nil && autoscalingOptions.ZeroOrMaxNodeScaling {
+		return true
+	}
+	return false
 }
 
 // unneededNodesLimit returns the number of nodes after which calculating more

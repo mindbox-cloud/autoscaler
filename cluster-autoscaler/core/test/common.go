@@ -31,10 +31,10 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/deletiontracker"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/pdb"
 	"k8s.io/autoscaler/cluster-autoscaler/debuggingsnapshot"
-	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	"k8s.io/autoscaler/cluster-autoscaler/expander"
 	"k8s.io/autoscaler/cluster-autoscaler/expander/random"
 	"k8s.io/autoscaler/cluster-autoscaler/metrics"
+	"k8s.io/autoscaler/cluster-autoscaler/observers/nodegroupchange"
 	"k8s.io/autoscaler/cluster-autoscaler/processors"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/actionablecluster"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/binpacking"
@@ -43,13 +43,13 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroupconfig"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroups"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroupset"
-	"k8s.io/autoscaler/cluster-autoscaler/processors/nodeinfos"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodeinfosprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodes"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/predicatechecker"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/backoff"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
@@ -109,6 +109,13 @@ type NodeGroupConfig struct {
 	MaxSize int
 }
 
+// NodeTemplateConfig is a structure to provide node info in tests
+type NodeTemplateConfig struct {
+	MachineType   string
+	NodeInfo      *schedulerframework.NodeInfo
+	NodeGroupName string
+}
+
 // ScaleUpTestConfig represents a config of a scale test
 type ScaleUpTestConfig struct {
 	Groups                  []NodeGroupConfig
@@ -116,8 +123,12 @@ type ScaleUpTestConfig struct {
 	Pods                    []PodConfig
 	ExtraPods               []PodConfig
 	OnScaleUp               testcloudprovider.OnScaleUpFunc
+	OnCreateGroup           testcloudprovider.OnNodeGroupCreateFunc
 	ExpansionOptionToChoose *GroupSizeChange
 	Options                 *config.AutoscalingOptions
+	NodeTemplateConfigs     map[string]*NodeTemplateConfig
+	EnableAutoprovisioning  bool
+	AllOrNothing            bool
 }
 
 // ScaleUpTestResult represents a node groups scale up result
@@ -166,22 +177,25 @@ func ExtractPodNames(pods []*apiv1.Pod) []string {
 // NewTestProcessors returns a set of simple processors for use in tests.
 func NewTestProcessors(context *context.AutoscalingContext) *processors.AutoscalingProcessors {
 	return &processors.AutoscalingProcessors{
-		PodListProcessor:       podlistprocessor.NewDefaultPodListProcessor(context.PredicateChecker),
+		PodListProcessor:       podlistprocessor.NewDefaultPodListProcessor(context.PredicateChecker, scheduling.ScheduleAnywhere),
 		NodeGroupListProcessor: &nodegroups.NoOpNodeGroupListProcessor{},
-		BinpackingLimiter:      binpacking.NewDefaultBinpackingLimiter(),
+		BinpackingLimiter:      binpacking.NewTimeLimiter(context.MaxNodeGroupBinpackingDuration),
 		NodeGroupSetProcessor:  nodegroupset.NewDefaultNodeGroupSetProcessor([]string{}, config.NodeGroupDifferenceRatios{}),
-		ScaleDownSetProcessor:  nodes.NewPostFilteringScaleDownNodeProcessor(),
+		ScaleDownSetProcessor: nodes.NewCompositeScaleDownSetProcessor([]nodes.ScaleDownSetProcessor{
+			nodes.NewMaxNodesProcessor(),
+			nodes.NewAtomicResizeFilteringProcessor(),
+		}),
 		// TODO(bskiba): change scale up test so that this can be a NoOpProcessor
 		ScaleUpStatusProcessor:      &status.EventingScaleUpStatusProcessor{},
 		ScaleDownStatusProcessor:    &status.NoOpScaleDownStatusProcessor{},
 		AutoscalingStatusProcessor:  &status.NoOpAutoscalingStatusProcessor{},
 		NodeGroupManager:            nodegroups.NewDefaultNodeGroupManager(),
-		NodeInfoProcessor:           nodeinfos.NewDefaultNodeInfoProcessor(),
 		TemplateNodeInfoProvider:    nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(nil, false),
-		NodeGroupConfigProcessor:    nodegroupconfig.NewDefaultNodeGroupConfigProcessor(),
+		NodeGroupConfigProcessor:    nodegroupconfig.NewDefaultNodeGroupConfigProcessor(context.NodeGroupDefaults),
 		CustomResourcesProcessor:    customresources.NewDefaultCustomResourcesProcessor(),
 		ActionableClusterProcessor:  actionablecluster.NewDefaultActionableClusterProcessor(),
 		ScaleDownCandidatesNotifier: scaledowncandidates.NewObserversList(),
+		ScaleStateNotifier:          nodegroupchange.NewNodeGroupChangeObserversList(),
 	}
 }
 
@@ -198,9 +212,6 @@ func NewScaleTestAutoscalingContext(
 	if err != nil {
 		return context.AutoscalingContext{}, err
 	}
-	// Ignoring error here is safe - if a test doesn't specify valid estimatorName,
-	// it either doesn't need one, or should fail when it turns out to be nil.
-	estimatorBuilder, _ := estimator.NewEstimatorBuilder(options.EstimatorName, estimator.NewThresholdBasedEstimationLimiter(0, 0), estimator.NewDecreasingPodOrderer())
 	predicateChecker, err := predicatechecker.NewTestPredicateChecker()
 	if err != nil {
 		return context.AutoscalingContext{}, err
@@ -222,7 +233,6 @@ func NewScaleTestAutoscalingContext(
 		PredicateChecker:     predicateChecker,
 		ClusterSnapshot:      clusterSnapshot,
 		ExpanderStrategy:     random.NewStrategy(),
-		EstimatorBuilder:     estimatorBuilder,
 		ProcessorCallbacks:   processorCallbacks,
 		DebuggingSnapshotter: debuggingSnapshotter,
 		RemainingPdbTracker:  remainingPdbTracker,
@@ -341,14 +351,17 @@ func (p *MockBinpackingLimiter) InitBinpacking(context *context.AutoscalingConte
 	p.requiredExpansionOptions = 1
 }
 
+// MarkProcessed is here to satisfy the interface.
+func (p *MockBinpackingLimiter) MarkProcessed(context *context.AutoscalingContext, nodegroupId string) {
+}
+
 // StopBinpacking stops the binpacking early, if we already have requiredExpansionOptions i.e. 1.
 func (p *MockBinpackingLimiter) StopBinpacking(context *context.AutoscalingContext, evaluatedOptions []expander.Option) bool {
 	return len(evaluatedOptions) == p.requiredExpansionOptions
 }
 
-// MarkProcessed is here to satisfy the interface.
-func (p *MockBinpackingLimiter) MarkProcessed(context *context.AutoscalingContext, nodegroupId string) {
-
+// FinalizeBinpacking is here to satisfy the interface.
+func (p *MockBinpackingLimiter) FinalizeBinpacking(context *context.AutoscalingContext, finalOptions []expander.Option) {
 }
 
 // NewBackoff creates a new backoff object

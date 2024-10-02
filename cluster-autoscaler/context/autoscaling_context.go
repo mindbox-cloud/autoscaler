@@ -18,17 +18,18 @@ package context
 
 import (
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
+	"k8s.io/autoscaler/cluster-autoscaler/clusterstate"
 	"k8s.io/autoscaler/cluster-autoscaler/clusterstate/utils"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/pdb"
 	"k8s.io/autoscaler/cluster-autoscaler/debuggingsnapshot"
-	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	"k8s.io/autoscaler/cluster-autoscaler/expander"
 	processor_callbacks "k8s.io/autoscaler/cluster-autoscaler/processors/callbacks"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/predicatechecker"
 	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
+	"k8s.io/client-go/informers"
 	kube_client "k8s.io/client-go/kubernetes"
 	kube_record "k8s.io/client-go/tools/record"
 	klog "k8s.io/klog/v2"
@@ -50,8 +51,6 @@ type AutoscalingContext struct {
 	ClusterSnapshot clustersnapshot.ClusterSnapshot
 	// ExpanderStrategy is the strategy used to choose which node group to expand when scaling up
 	ExpanderStrategy expander.Strategy
-	// EstimatorBuilder is the builder function for node count estimator to be used.
-	EstimatorBuilder estimator.EstimatorBuilder
 	// ProcessorCallbacks is interface defining extra callback methods which can be called by processors used in extension points.
 	ProcessorCallbacks processor_callbacks.ProcessorCallbacks
 	// DebuggingSnapshotter is the interface for capturing the debugging snapshot
@@ -60,6 +59,8 @@ type AutoscalingContext struct {
 	ScaleDownActuator scaledown.Actuator
 	// RemainingPdbTracker tracks the remaining pod disruption budget
 	RemainingPdbTracker pdb.RemainingPdbTracker
+	// ClusterStateRegistry tracks the health of the node groups and pending scale-ups and scale-downs
+	ClusterStateRegistry *clusterstate.ClusterStateRegistry
 }
 
 // AutoscalingKubeClients contains all Kubernetes API clients,
@@ -102,10 +103,11 @@ func NewAutoscalingContext(
 	autoscalingKubeClients *AutoscalingKubeClients,
 	cloudProvider cloudprovider.CloudProvider,
 	expanderStrategy expander.Strategy,
-	estimatorBuilder estimator.EstimatorBuilder,
 	processorCallbacks processor_callbacks.ProcessorCallbacks,
 	debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter,
-	remainingPdbTracker pdb.RemainingPdbTracker) *AutoscalingContext {
+	remainingPdbTracker pdb.RemainingPdbTracker,
+	clusterStateRegistry *clusterstate.ClusterStateRegistry,
+) *AutoscalingContext {
 	return &AutoscalingContext{
 		AutoscalingOptions:     options,
 		CloudProvider:          cloudProvider,
@@ -113,24 +115,23 @@ func NewAutoscalingContext(
 		PredicateChecker:       predicateChecker,
 		ClusterSnapshot:        clusterSnapshot,
 		ExpanderStrategy:       expanderStrategy,
-		EstimatorBuilder:       estimatorBuilder,
 		ProcessorCallbacks:     processorCallbacks,
 		DebuggingSnapshotter:   debuggingSnapshotter,
 		RemainingPdbTracker:    remainingPdbTracker,
+		ClusterStateRegistry:   clusterStateRegistry,
 	}
 }
 
 // NewAutoscalingKubeClients builds AutoscalingKubeClients out of basic client.
-func NewAutoscalingKubeClients(opts config.AutoscalingOptions, kubeClient, eventsKubeClient kube_client.Interface) *AutoscalingKubeClients {
-	listerRegistryStopChannel := make(chan struct{})
-	listerRegistry := kube_util.NewListerRegistryWithDefaultListers(kubeClient, listerRegistryStopChannel)
-	kubeEventRecorder := kube_util.CreateEventRecorder(eventsKubeClient, opts.RecordDuplicatedEvents)
+func NewAutoscalingKubeClients(opts config.AutoscalingOptions, kubeClient kube_client.Interface, informerFactory informers.SharedInformerFactory) *AutoscalingKubeClients {
+	listerRegistry := kube_util.NewListerRegistryWithDefaultListers(informerFactory)
+	kubeEventRecorder := kube_util.CreateEventRecorder(kubeClient, opts.RecordDuplicatedEvents)
 	logRecorder, err := utils.NewStatusMapRecorder(kubeClient, opts.ConfigNamespace, kubeEventRecorder, opts.WriteStatusConfigMap, opts.StatusConfigMapName)
 	if err != nil {
 		klog.Error("Failed to initialize status configmap, unable to write status events")
 		// Get a dummy, so we can at least safely call the methods
 		// TODO(maciekpytel): recover from this after successful status configmap update?
-		logRecorder, _ = utils.NewStatusMapRecorder(eventsKubeClient, opts.ConfigNamespace, kubeEventRecorder, false, opts.StatusConfigMapName)
+		logRecorder, _ = utils.NewStatusMapRecorder(kubeClient, opts.ConfigNamespace, kubeEventRecorder, false, opts.StatusConfigMapName)
 	}
 
 	return &AutoscalingKubeClients{

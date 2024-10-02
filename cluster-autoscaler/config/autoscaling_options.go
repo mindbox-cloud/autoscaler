@@ -18,6 +18,10 @@ package config
 
 import (
 	"time"
+
+	gce_localssdsize "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/gce/localssdsize"
+	kubelet_config "k8s.io/kubernetes/pkg/kubelet/apis/config"
+	scheduler_config "k8s.io/kubernetes/pkg/scheduler/apis/config"
 )
 
 // GpuLimits define lower and upper bound on GPU instances of given type in cluster
@@ -46,16 +50,25 @@ type NodeGroupAutoscalingOptions struct {
 	ScaleDownUnreadyTime time.Duration
 	// Maximum time CA waits for node to be provisioned
 	MaxNodeProvisionTime time.Duration
+	// ZeroOrMaxNodeScaling means that a node group should be scaled up to maximum size or down to zero nodes all at once instead of one-by-one.
+	ZeroOrMaxNodeScaling bool
+	// IgnoreDaemonSetsUtilization sets if daemonsets utilization should be considered during node scale-down
+	IgnoreDaemonSetsUtilization bool
 }
 
 // GCEOptions contain autoscaling options specific to GCE cloud provider.
 type GCEOptions struct {
-	// ConcurrentRefreshes is the maximum number of concurrently refreshed instance groups or instance templates.
+	// ConcurrentRefreshes is the maximum number of concurrently refreshed instance groups or instance templates or zones with mig instances
 	ConcurrentRefreshes int
 	// MigInstancesMinRefreshWaitTime is the minimum time which needs to pass before GCE MIG instances from a given MIG can be refreshed.
 	MigInstancesMinRefreshWaitTime time.Duration
-	// ExpanderEphemeralStorageSupport is whether scale-up takes ephemeral storage resources into account.
-	ExpanderEphemeralStorageSupport bool
+	// DomainUrl is the GCE url used to make calls to GCE API.
+	DomainUrl string
+	// LocalSSDDiskSizeProvider provides local ssd disk size based on machine type
+	LocalSSDDiskSizeProvider gce_localssdsize.LocalSSDSizeProvider
+	// BulkMigInstancesListingEnabled means that cluster instances should be listed in bulk instead of per mig.
+	// Instances of migs having instances in creating or deleting state are re-fetched using igm.ListInstances. Inconsistencies are handled by re-fetching using igm.ListInstances
+	BulkMigInstancesListingEnabled bool
 }
 
 const (
@@ -115,13 +128,16 @@ type AutoscalingOptions struct {
 	GRPCExpanderCert string
 	// GRPCExpanderURL is the url of the gRPC server when using the gRPC expander
 	GRPCExpanderURL string
-	// IgnoreDaemonSetsUtilization is whether CA will ignore DaemonSet pods when calculating resource utilization for scaling down
-	IgnoreDaemonSetsUtilization bool
 	// IgnoreMirrorPodsUtilization is whether CA will ignore Mirror pods when calculating resource utilization for scaling down
 	IgnoreMirrorPodsUtilization bool
 	// MaxGracefulTerminationSec is maximum number of seconds scale down waits for pods to terminate before
 	// removing the node from cloud provider.
+	// DrainPriorityConfig takes higher precedence and MaxGracefulTerminationSec will not be applicable when the DrainPriorityConfig is set.
 	MaxGracefulTerminationSec int
+	// DrainPriorityConfig is a list of ShutdownGracePeriodByPodPriority.
+	// This field is optional and could be nil.
+	// DrainPriorityConfig takes higher precedence and MaxGracefulTerminationSec will not be applicable when the DrainPriorityConfig is set.
+	DrainPriorityConfig []kubelet_config.ShutdownGracePeriodByPodPriority
 	// MaxTotalUnreadyPercentage is the maximum percentage of unready nodes after which CA halts operations
 	MaxTotalUnreadyPercentage float64
 	// OkTotalUnreadyCount is the number of allowed unready nodes, irrespective of max-total-unready-percentage
@@ -148,6 +164,9 @@ type AutoscalingOptions struct {
 	ScaleDownDelayAfterDelete time.Duration
 	// ScaleDownDelayAfterFailure sets the duration before the next scale down attempt if scale down results in an error
 	ScaleDownDelayAfterFailure time.Duration
+	// ScaleDownDelayTypeLocal sets if the --scale-down-delay-after-* flags should be applied locally per nodegroup
+	// or globally across all nodegroups
+	ScaleDownDelayTypeLocal bool
 	// ScaleDownNonEmptyCandidatesCount is the maximum number of non empty nodes
 	// considered at once as candidates for scale down.
 	ScaleDownNonEmptyCandidatesCount int
@@ -164,6 +183,9 @@ type AutoscalingOptions struct {
 	// ScaleDownSimulationTimeout defines the maximum time that can be
 	// spent on scale down simulation.
 	ScaleDownSimulationTimeout time.Duration
+	// SchedulerConfig allows changing configuration of in-tree
+	// scheduler plugins acting on PreFilter and Filter extension points
+	SchedulerConfig *scheduler_config.KubeSchedulerConfiguration
 	// NodeDeletionDelayTimeout is maximum time CA waits for removing delay-deletion.cluster-autoscaler.kubernetes.io/ annotations before deleting the node.
 	NodeDeletionDelayTimeout time.Duration
 	// WriteStatusConfigMap tells if the status information should be written to a ConfigMap
@@ -196,10 +218,10 @@ type AutoscalingOptions struct {
 	MaxBulkSoftTaintTime time.Duration
 	// MaxPodEvictionTime sets the maximum time CA tries to evict a pod before giving up.
 	MaxPodEvictionTime time.Duration
-	// IgnoredTaints is a list of taints CA considers to reflect transient node
+	// StartupTaints is a list of taints CA considers to reflect transient node
 	// status that should be removed when creating a node template for scheduling.
-	// The ignored taints are expected to appear during node startup.
-	IgnoredTaints []string
+	// startup taints are expected to appear during node startup.
+	StartupTaints []string
 	// StatusTaints is a list of taints CA considers to reflect transient node
 	// status that should be removed when creating a node template for scheduling.
 	// The status taints are expected to appear during node lifetime, after startup.
@@ -214,12 +236,8 @@ type AutoscalingOptions struct {
 	AWSUseStaticInstanceList bool
 	// GCEOptions contain autoscaling options specific to GCE cloud provider.
 	GCEOptions GCEOptions
-	// Path to kube configuration if available
-	KubeConfigPath string
-	// Burst setting for kubernetes client
-	KubeClientBurst int
-	// QPS setting for kubernetes client
-	KubeClientQPS float64
+	// KubeClientOpts specify options for kube client
+	KubeClientOpts KubeClientOptions
 	// ClusterAPICloudConfigAuthoritative tells the Cluster API provider to treat the CloudConfig option as authoritative and
 	// not use KubeConfigPath as a fallback when it is not provided.
 	ClusterAPICloudConfigAuthoritative bool
@@ -250,6 +268,9 @@ type AutoscalingOptions struct {
 	// MaxNodeGroupBinpackingDuration is a maximum time that can be spent binpacking a single NodeGroup. If the threshold
 	// is exceeded binpacking will be cut short and a partial scale-up will be performed.
 	MaxNodeGroupBinpackingDuration time.Duration
+	// MaxBinpackingTime is the maximum time spend on binpacking for a single scale-up.
+	// If binpacking is limited by this, scale-up will continue with the already calculated scale-up options.
+	MaxBinpackingTime time.Duration
 	// NodeDeletionBatcherInterval is a time for how long CA ScaleDown gather nodes to delete them in batch.
 	NodeDeletionBatcherInterval time.Duration
 	// SkipNodesWithSystemPods tells if nodes with pods from kube-system should be deleted (except for DaemonSet or mirror pods)
@@ -267,4 +288,25 @@ type AutoscalingOptions struct {
 	ParallelDrain bool
 	// NodeGroupSetRatio is a collection of ratios used by CA used to make scaling decisions.
 	NodeGroupSetRatios NodeGroupDifferenceRatios
+	// dynamicNodeDeleteDelayAfterTaintEnabled is used to enable/disable dynamic adjustment of NodeDeleteDelayAfterTaint
+	// based on the latency between the CA and the api-server
+	DynamicNodeDeleteDelayAfterTaintEnabled bool
+	// BypassedSchedulers are used to specify which schedulers to bypass their processing
+	BypassedSchedulers map[string]bool
+	// ProvisioningRequestEnabled tells if CA processes ProvisioningRequest.
+	ProvisioningRequestEnabled bool
+}
+
+// KubeClientOptions specify options for kube client
+type KubeClientOptions struct {
+	// Master specifies master location.
+	Master string
+	// Path to kube configuration if available
+	KubeConfigPath string
+	// APIContentType specifies type of requests sent to APIServer.
+	APIContentType string
+	// Burst setting for kubernetes client
+	KubeClientBurst int
+	// QPS setting for kubernetes client
+	KubeClientQPS float32
 }

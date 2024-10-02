@@ -74,12 +74,15 @@ var (
 		"c2":  0.03398,
 		"c2d": 0.029563,
 		"c3":  0.03398,
+		"c3d": 0.02956,
 		"e2":  0.021811,
 		"m1":  0.0348,
 		"n1":  0.031611,
 		"n2":  0.031611,
 		"n2d": 0.027502,
+		"n4":  0.030821,
 		"t2d": 0.027502,
+		"z3":  0.04965,
 	}
 	predefinedMemoryPricePerHourPerGb = map[string]float64{
 		"a2":  0.004237,
@@ -87,12 +90,15 @@ var (
 		"c2":  0.00455,
 		"c2d": 0.003959,
 		"c3":  0.00456,
+		"c3d": 0.003956,
 		"e2":  0.002923,
 		"m1":  0.0051,
 		"n1":  0.004237,
 		"n2":  0.004237,
 		"n2d": 0.003686,
+		"n4":  0.004131,
 		"t2d": 0.003686,
+		"z3":  0.00666,
 	}
 	predefinedPreemptibleDiscount = map[string]float64{
 		"a2":  0.009483 / 0.031611,
@@ -100,12 +106,15 @@ var (
 		"c2":  0.00822 / 0.03398,
 		"c2d": 0.007154 / 0.029563,
 		"c3":  0.003086 / 0.03398,
+		"c3d": 0.011825 / 0.02956,
 		"e2":  0.006543 / 0.021811,
 		"m1":  0.00733 / 0.0348,
 		"n1":  0.006655 / 0.031611,
 		"n2":  0.007650 / 0.031611,
 		"n2d": 0.002773 / 0.027502,
+		"n4":  0.007976 / 0.030821,
 		"t2d": 0.006655 / 0.027502,
+		"z3":  0.01986 / 0.04965,
 	}
 	customCpuPricePerHour = map[string]float64{
 		"e2":  0.022890,
@@ -192,6 +201,30 @@ var (
 		"c3-highcpu-44":    1.8964,
 		"c3-highcpu-88":    3.7928,
 		"c3-highcpu-176":   7.5856,
+		"c3d-standard-4":   0.1816,
+		"c3d-standard-8":   0.3632,
+		"c3d-standard-16":  0.7264,
+		"c3d-standard-30":  1.362,
+		"c3d-standard-60":  2.724,
+		"c3d-standard-90":  4.086,
+		"c3d-standard-180": 8.172,
+		"c3d-standard-360": 16.344,
+		"c3d-highmem-4":    0.24496,
+		"c3d-highmem-8":    0.48992,
+		"c3d-highmem-16":   0.97984,
+		"c3d-highmem-30":   1.8372,
+		"c3d-highmem-60":   3.6744,
+		"c3d-highmem-90":   5.5116,
+		"c3d-highmem-180":  11.0232,
+		"c3d-highmem-360":  22.0464,
+		"c3d-highcpu-4":    0.14992,
+		"c3d-highcpu-8":    0.29984,
+		"c3d-highcpu-16":   0.59968,
+		"c3d-highcpu-30":   1.1244,
+		"c3d-highcpu-60":   2.2488,
+		"c3d-highcpu-90":   3.3732,
+		"c3d-highcpu-180":  6.7464,
+		"c3d-highcpu-360":  13.4928,
 		"e2-highcpu-2":     0.04947,
 		"e2-highcpu-4":     0.09894,
 		"e2-highcpu-8":     0.19788,
@@ -309,6 +342,8 @@ var (
 		"t2d-standard-32":  1.3519,
 		"t2d-standard-48":  2.0278,
 		"t2d-standard-60":  2.5348,
+		"z3-highmem-88":    13.0,
+		"z3-highmem-176":   22.05,
 	}
 	preemptiblePrices = map[string]float64{
 		"a2-highgpu-1g":    1.102016,
@@ -486,6 +521,8 @@ var (
 		"t2d-standard-32":  0.3271,
 		"t2d-standard-48":  0.4907,
 		"t2d-standard-60":  0.6134,
+		"z3-highmem-88":    5.2,
+		"z3-highmem-176":   8.82,
 	}
 	gpuPrices = map[string]float64{
 		"nvidia-tesla-t4":   0.35,
@@ -512,8 +549,9 @@ var (
 		"pd-balanced": 0.100 / hoursInMonth,
 		"pd-ssd":      0.170 / hoursInMonth,
 	}
-	// DefaultBootDiskType is pd-standard disk type.
-	DefaultBootDiskType = "pd-standard"
+	// DefaultBootDiskType is pd-balanced disk type.
+	// ref: https://cloud.google.com/kubernetes-engine/docs/how-to/custom-boot-disks#specify
+	DefaultBootDiskType = "pd-balanced"
 )
 
 // GcePriceInfo is the GCE specific implementation of the PricingInfo.

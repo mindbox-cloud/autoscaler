@@ -123,6 +123,11 @@ func (ng *brightboxNodeGroup) IncreaseSize(delta int) error {
 	)
 }
 
+// AtomicIncreaseSize is not implemented.
+func (ng *brightboxNodeGroup) AtomicIncreaseSize(delta int) error {
+	return cloudprovider.ErrNotImplemented
+}
+
 // DeleteNodes deletes nodes from this node group. Error is returned
 // either on failure or if the given node doesn't belong to this
 // node group. This function should wait until node group size is
@@ -334,13 +339,6 @@ func (ng *brightboxNodeGroup) findServerType() (*brightbox.ServerType, error) {
 	return nil, fmt.Errorf("ServerType with handle '%s' doesn't exist", handle)
 }
 
-func max(x, y int64) int64 {
-	if x > y {
-		return x
-	}
-	return y
-}
-
 func applyFudgeFactor(capacity *schedulerframework.Resource) *schedulerframework.Resource {
 	allocatable := capacity.Clone()
 	allocatable.Memory = max(0, capacity.Memory-max(capacity.Memory*memoryReservePercent/100, minimumMemoryReserve))
@@ -359,24 +357,32 @@ func makeNodeGroupFromAPIDetails(
 	if mapData["server_group"] == "" {
 		return nil, cloudprovider.ErrIllegalConfiguration
 	}
+	ng := brightboxNodeGroup{
+		id:      mapData["server_group"],
+		minSize: minSize,
+		maxSize: maxSize,
+		Cloud:   cloudclient,
+	}
+	imageID := mapData["image"]
+	if !(len(imageID) == 9 && strings.HasPrefix(imageID, "img-")) {
+		image, err := ng.GetImageByName(imageID)
+		if err != nil || image == nil {
+			return nil, cloudprovider.ErrIllegalConfiguration
+		}
+		imageID = image.Id
+	}
 	userData := mapData["user_data"]
 	options := &brightbox.ServerOptions{
-		Image:        mapData["image"],
+		Image:        imageID,
 		Name:         &name,
 		ServerType:   mapData["type"],
 		Zone:         mapData["zone"],
 		UserData:     &userData,
 		ServerGroups: mergeServerGroups(mapData),
 	}
-	result := brightboxNodeGroup{
-		id:            mapData["server_group"],
-		minSize:       minSize,
-		maxSize:       maxSize,
-		serverOptions: options,
-		Cloud:         cloudclient,
-	}
-	klog.V(4).Info(result.Debug())
-	return &result, nil
+	ng.serverOptions = options
+	klog.V(4).Info(ng.Debug())
+	return &ng, nil
 }
 
 func mergeServerGroups(data map[string]string) []string {

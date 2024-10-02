@@ -24,15 +24,13 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	testprovider "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/test"
-	"k8s.io/autoscaler/cluster-autoscaler/clusterstate"
-	clusterstate_utils "k8s.io/autoscaler/cluster-autoscaler/clusterstate/utils"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/deletiontracker"
 	. "k8s.io/autoscaler/cluster-autoscaler/core/test"
+	"k8s.io/autoscaler/cluster-autoscaler/observers/nodegroupchange"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
-	kube_record "k8s.io/client-go/tools/record"
 )
 
 func TestAddNodeToBucket(t *testing.T) {
@@ -43,8 +41,8 @@ func TestAddNodeToBucket(t *testing.T) {
 	}
 	nodeGroup1 := "ng-1"
 	nodeGroup2 := "ng-2"
-	nodes1 := generateNodes(5, "ng-1")
-	nodes2 := generateNodes(5, "ng-2")
+	nodes1 := generateNodes(0, 5, "ng-1")
+	nodes2 := generateNodes(0, 5, "ng-2")
 	provider.AddNodeGroup(nodeGroup1, 1, 10, 5)
 	provider.AddNodeGroup(nodeGroup2, 1, 10, 5)
 	for _, node := range nodes1 {
@@ -84,17 +82,18 @@ func TestAddNodeToBucket(t *testing.T) {
 	for _, test := range testcases {
 		d := NodeDeletionBatcher{
 			ctx:                   &ctx,
-			clusterState:          nil,
+			scaleStateNotifier:    nil,
 			nodeDeletionTracker:   nil,
 			deletionsPerNodeGroup: make(map[string][]*apiv1.Node),
 			drainedNodeDeletions:  make(map[string]bool),
 		}
 		batchCount := 0
 		for _, node := range test.nodes {
-			_, first, err := d.addNodeToBucket(node, test.drained)
+			nodeGroup, err := provider.NodeGroupForNode(node)
 			if err != nil {
-				t.Errorf("addNodeToBucket return error %q when addidng node %v", err, node)
+				t.Errorf("couldn't get node info for node %s: %s", node.Name, err)
 			}
+			first := d.addNodesToBucket([]*apiv1.Node{node}, nodeGroup, test.drained)
 			if first {
 				batchCount += 1
 			}
@@ -137,7 +136,6 @@ func TestRemove(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			test := test
 			fakeClient := &fake.Clientset{}
-			fakeLogRecorder, _ := clusterstate_utils.NewStatusMapRecorder(fakeClient, "kube-system", kube_record.NewFakeRecorder(5), false, "my-cool-configmap")
 
 			failedNodeDeletion := make(map[string]bool)
 			deletedNodes := make(chan string, 10)
@@ -161,22 +159,24 @@ func TestRemove(t *testing.T) {
 				})
 
 			ctx, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{}, fakeClient, nil, provider, nil, nil)
-			clusterStateRegistry := clusterstate.NewClusterStateRegistry(provider, clusterstate.ClusterStateRegistryConfig{}, fakeLogRecorder, NewBackoff(), clusterstate.NewStaticMaxNodeProvisionTimeProvider(15*time.Minute))
 			if err != nil {
 				t.Fatalf("Couldn't set up autoscaling context: %v", err)
 			}
 
+			scaleStateNotifier := nodegroupchange.NewNodeGroupChangeObserversList()
+
 			ng := "ng"
 			provider.AddNodeGroup(ng, 1, 10, test.numNodes)
+			nodeGroup := provider.GetNodeGroup(ng)
 
 			d := NodeDeletionBatcher{
 				ctx:                   &ctx,
-				clusterState:          clusterStateRegistry,
 				nodeDeletionTracker:   deletiontracker.NewNodeDeletionTracker(1 * time.Minute),
 				deletionsPerNodeGroup: make(map[string][]*apiv1.Node),
+				scaleStateNotifier:    scaleStateNotifier,
 				drainedNodeDeletions:  make(map[string]bool),
 			}
-			nodes := generateNodes(test.numNodes, ng)
+			nodes := generateNodes(0, test.numNodes, ng)
 			failedDeletion := test.failedDeletion
 			for _, node := range nodes {
 				if failedDeletion > 0 {
@@ -191,14 +191,11 @@ func TestRemove(t *testing.T) {
 						Key:    taints.ToBeDeletedTaint,
 						Effect: apiv1.TaintEffectNoSchedule,
 					})
-					_, _, err := d.addNodeToBucket(node, true)
-					if err != nil {
-						t.Errorf("addNodeToBucket return error %q when addidng node %v", err, node)
-					}
+					d.addNodesToBucket([]*apiv1.Node{node}, nodeGroup, true)
 				}
 			}
 
-			err = d.remove(ng)
+			err = d.remove(nodeGroup.Id())
 			if test.err {
 				if err == nil {
 					t.Errorf("remove() should return error, but return nil")

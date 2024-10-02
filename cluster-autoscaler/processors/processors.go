@@ -18,13 +18,13 @@ package processors
 
 import (
 	"k8s.io/autoscaler/cluster-autoscaler/config"
+	"k8s.io/autoscaler/cluster-autoscaler/observers/nodegroupchange"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/actionablecluster"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/binpacking"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/customresources"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroupconfig"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroups"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroupset"
-	"k8s.io/autoscaler/cluster-autoscaler/processors/nodeinfos"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodeinfosprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodes"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/pods"
@@ -55,8 +55,6 @@ type AutoscalingProcessors struct {
 	AutoscalingStatusProcessor status.AutoscalingStatusProcessor
 	// NodeGroupManager is responsible for creating/deleting node groups.
 	NodeGroupManager nodegroups.NodeGroupManager
-	// NodeInfoProcessor is used to process nodeInfos after they're created.
-	NodeInfoProcessor nodeinfos.NodeInfoProcessor
 	// TemplateNodeInfoProvider is used to create the initial nodeInfos set.
 	TemplateNodeInfoProvider nodeinfosprovider.TemplateNodeInfoProvider
 	// NodeGroupConfigProcessor provides config option for each NodeGroup.
@@ -67,31 +65,42 @@ type AutoscalingProcessors struct {
 	ActionableClusterProcessor actionablecluster.ActionableClusterProcessor
 	// ScaleDownCandidatesNotifier  is used to Update and Register new scale down candidates observer.
 	ScaleDownCandidatesNotifier *scaledowncandidates.ObserversList
+	// ScaleStateNotifier is used to notify
+	// * scale-ups per nodegroup
+	// * scale-downs per nodegroup
+	// * scale-up failures per nodegroup
+	// * scale-down failures per nodegroup
+	ScaleStateNotifier *nodegroupchange.NodeGroupChangeObserversList
 }
 
 // DefaultProcessors returns default set of processors.
-func DefaultProcessors() *AutoscalingProcessors {
+func DefaultProcessors(options config.AutoscalingOptions) *AutoscalingProcessors {
 	return &AutoscalingProcessors{
 		PodListProcessor:       pods.NewDefaultPodListProcessor(),
 		NodeGroupListProcessor: nodegroups.NewDefaultNodeGroupListProcessor(),
-		BinpackingLimiter:      binpacking.NewDefaultBinpackingLimiter(),
+		BinpackingLimiter:      binpacking.NewTimeLimiter(options.MaxBinpackingTime),
 		NodeGroupSetProcessor: nodegroupset.NewDefaultNodeGroupSetProcessor([]string{}, config.NodeGroupDifferenceRatios{
 			MaxAllocatableDifferenceRatio:    config.DefaultMaxAllocatableDifferenceRatio,
 			MaxCapacityMemoryDifferenceRatio: config.DefaultMaxCapacityMemoryDifferenceRatio,
 			MaxFreeDifferenceRatio:           config.DefaultMaxFreeDifferenceRatio,
 		}),
-		ScaleUpStatusProcessor:      status.NewDefaultScaleUpStatusProcessor(),
-		ScaleDownNodeProcessor:      nodes.NewPreFilteringScaleDownNodeProcessor(),
-		ScaleDownSetProcessor:       nodes.NewPostFilteringScaleDownNodeProcessor(),
+		ScaleUpStatusProcessor: status.NewDefaultScaleUpStatusProcessor(),
+		ScaleDownNodeProcessor: nodes.NewPreFilteringScaleDownNodeProcessor(),
+		ScaleDownSetProcessor: nodes.NewCompositeScaleDownSetProcessor(
+			[]nodes.ScaleDownSetProcessor{
+				nodes.NewMaxNodesProcessor(),
+				nodes.NewAtomicResizeFilteringProcessor(),
+			},
+		),
 		ScaleDownStatusProcessor:    status.NewDefaultScaleDownStatusProcessor(),
 		AutoscalingStatusProcessor:  status.NewDefaultAutoscalingStatusProcessor(),
 		NodeGroupManager:            nodegroups.NewDefaultNodeGroupManager(),
-		NodeInfoProcessor:           nodeinfos.NewDefaultNodeInfoProcessor(),
-		NodeGroupConfigProcessor:    nodegroupconfig.NewDefaultNodeGroupConfigProcessor(),
+		NodeGroupConfigProcessor:    nodegroupconfig.NewDefaultNodeGroupConfigProcessor(options.NodeGroupDefaults),
 		CustomResourcesProcessor:    customresources.NewDefaultCustomResourcesProcessor(),
 		ActionableClusterProcessor:  actionablecluster.NewDefaultActionableClusterProcessor(),
 		TemplateNodeInfoProvider:    nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(nil, false),
 		ScaleDownCandidatesNotifier: scaledowncandidates.NewObserversList(),
+		ScaleStateNotifier:          nodegroupchange.NewNodeGroupChangeObserversList(),
 	}
 }
 
@@ -106,7 +115,6 @@ func (ap *AutoscalingProcessors) CleanUp() {
 	ap.AutoscalingStatusProcessor.CleanUp()
 	ap.NodeGroupManager.CleanUp()
 	ap.ScaleDownNodeProcessor.CleanUp()
-	ap.NodeInfoProcessor.CleanUp()
 	ap.NodeGroupConfigProcessor.CleanUp()
 	ap.CustomResourcesProcessor.CleanUp()
 	ap.TemplateNodeInfoProvider.CleanUp()
