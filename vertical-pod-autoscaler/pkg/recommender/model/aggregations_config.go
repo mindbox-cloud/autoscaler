@@ -78,9 +78,12 @@ const (
 	// DefaultOOMBumpUpRatio is the default value for OOMBumpUpRatio.
 	DefaultOOMBumpUpRatio float64 = 1.2 // Memory is increased by 20% after an OOMKill.
 	// DefaultOOMMinBumpUp is the default value for OOMMinBumpUp.
-	DefaultOOMMinBumpUp                 float64 = 100 * 1024 * 1024 // Memory is increased by at least 100MB after an OOMKill.
-	DefaultUseLinearCPUHistogram        bool    = false
-	DefaultLinearCPUHistogramMaxValue   float64 = 4
+	DefaultOOMMinBumpUp float64 = 100 * 1024 * 1024 // Memory is increased by at least 100MB after an OOMKill.
+	// DefaultUseLinearCPUHistogram is the default value for UseLinearCPUHistogram.
+	DefaultUseLinearCPUHistogram bool = false
+	// DefaultLinearCPUHistogramMaxValue is the default value for LinearCPUHistogramMaxValue.
+	DefaultLinearCPUHistogramMaxValue float64 = 4
+	// DefaultLinearCpuHistogramBucketSize is the default value for DefaultLinearCpuHistogramBucketSize.
 	DefaultLinearCpuHistogramBucketSize float64 = 0.025
 )
 
