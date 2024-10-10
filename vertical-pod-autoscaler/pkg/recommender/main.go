@@ -214,7 +214,7 @@ func run(healthCheck *metrics.HealthCheck) {
 		*oomMinBumpUp,
 		*useLinearCpuHistogram,
 		*linearCpuHistogramMaxValue,
-		*linearCpuHistogramMaxValue))
+		*linearCpuHistogramBucketSize))
 
 	useCheckpoints := *storage != "prometheus"
 
