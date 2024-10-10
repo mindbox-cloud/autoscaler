@@ -96,6 +96,9 @@ var (
 	cpuHistogramDecayHalfLife      = flag.Duration("cpu-histogram-decay-half-life", model.DefaultCPUHistogramDecayHalfLife, `The amount of time it takes a historical CPU usage sample to lose half of its weight.`)
 	oomBumpUpRatio                 = flag.Float64("oom-bump-up-ratio", model.DefaultOOMBumpUpRatio, `The memory bump up ratio when OOM occurred, default is 1.2.`)
 	oomMinBumpUp                   = flag.Float64("oom-min-bump-up-bytes", model.DefaultOOMMinBumpUp, `The minimal increase of memory when OOM occurred in bytes, default is 100 * 1024 * 1024`)
+	useLinearCpuHistogram          = flag.Bool("use-linear-cpu-histogram", model.DefaultUseLinearCPUHistogram, "Use linear histogram for CPU samples, default is false")
+	linearCpuHistogramMaxValue     = flag.Float64("linear-cpu-histogram-max-value", model.DefaultLinearCPUHistogramMaxValue, "Last bucket value for linear CPU histogram, default is 4")
+	linearCpuHistogramBucketSize   = flag.Float64("linear-cpu-histogram-bucket-size", model.DefaultLinearCpuHistogramBucketSize, "Linear CPU histogram bucket size, default is 0.025")
 )
 
 // Post processors flags
@@ -202,7 +205,16 @@ func run(healthCheck *metrics.HealthCheck) {
 	controllerFetcher := controllerfetcher.NewControllerFetcher(config, kubeClient, factory, scaleCacheEntryFreshnessTime, scaleCacheEntryLifetime, scaleCacheEntryJitterFactor)
 	podLister, oomObserver := input.NewPodListerAndOOMObserver(kubeClient, *vpaObjectNamespace)
 
-	model.InitializeAggregationsConfig(model.NewAggregationsConfig(*memoryAggregationInterval, *memoryAggregationIntervalCount, *memoryHistogramDecayHalfLife, *cpuHistogramDecayHalfLife, *oomBumpUpRatio, *oomMinBumpUp))
+	model.InitializeAggregationsConfig(model.NewAggregationsConfig(
+		*memoryAggregationInterval,
+		*memoryAggregationIntervalCount,
+		*memoryHistogramDecayHalfLife,
+		*cpuHistogramDecayHalfLife,
+		*oomBumpUpRatio,
+		*oomMinBumpUp,
+		*useLinearCpuHistogram,
+		*linearCpuHistogramMaxValue,
+		*linearCpuHistogramBucketSize))
 
 	useCheckpoints := *storage != "prometheus"
 

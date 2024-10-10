@@ -79,6 +79,12 @@ const (
 	DefaultOOMBumpUpRatio float64 = 1.2 // Memory is increased by 20% after an OOMKill.
 	// DefaultOOMMinBumpUp is the default value for OOMMinBumpUp.
 	DefaultOOMMinBumpUp float64 = 100 * 1024 * 1024 // Memory is increased by at least 100MB after an OOMKill.
+	// DefaultUseLinearCPUHistogram is the default value for UseLinearCPUHistogram.
+	DefaultUseLinearCPUHistogram bool = false
+	// DefaultLinearCPUHistogramMaxValue is the default value for LinearCPUHistogramMaxValue.
+	DefaultLinearCPUHistogramMaxValue float64 = 4
+	// DefaultLinearCpuHistogramBucketSize is the default value for DefaultLinearCpuHistogramBucketSize.
+	DefaultLinearCpuHistogramBucketSize float64 = 0.025
 )
 
 // GetMemoryAggregationWindowLength returns the total length of the memory usage history aggregated by VPA.
@@ -86,11 +92,23 @@ func (a *AggregationsConfig) GetMemoryAggregationWindowLength() time.Duration {
 	return a.MemoryAggregationInterval * time.Duration(a.MemoryAggregationIntervalCount)
 }
 
-func (a *AggregationsConfig) cpuHistogramOptions() util.HistogramOptions {
+func (a *AggregationsConfig) cpuHistogramOptions(
+	useLinearCpuHistogram bool,
+	linearCpuHistogramMaxValue float64,
+	linearCpuHistogramBucketSize float64) util.HistogramOptions {
+	// When parameters below are changed SupportedCheckpointVersion has to be bumped.
+	if useLinearCpuHistogram {
+		options, err := util.NewLinearHistogramOptions(linearCpuHistogramMaxValue, linearCpuHistogramBucketSize, epsilon)
+
+		if err != nil {
+			panic("Invalid CPU histogram options") // Should not happen.
+		}
+
+		return options
+	}
+
 	// CPU histograms use exponential bucketing scheme with the smallest bucket
 	// size of 0.01 core, max of 1000.0 cores and the relative error of HistogramRelativeError.
-	//
-	// When parameters below are changed SupportedCheckpointVersion has to be bumped.
 	options, err := util.NewExponentialHistogramOptions(1000.0, 0.01, 1.+a.HistogramBucketSizeGrowth, epsilon)
 	if err != nil {
 		panic("Invalid CPU histogram options") // Should not happen.
@@ -111,7 +129,16 @@ func (a *AggregationsConfig) memoryHistogramOptions() util.HistogramOptions {
 }
 
 // NewAggregationsConfig creates a new AggregationsConfig based on the supplied parameters and default values.
-func NewAggregationsConfig(memoryAggregationInterval time.Duration, memoryAggregationIntervalCount int64, memoryHistogramDecayHalfLife, cpuHistogramDecayHalfLife time.Duration, oomBumpUpRatio float64, oomMinBumpUp float64) *AggregationsConfig {
+func NewAggregationsConfig(
+	memoryAggregationInterval time.Duration,
+	memoryAggregationIntervalCount int64,
+	memoryHistogramDecayHalfLife,
+	cpuHistogramDecayHalfLife time.Duration,
+	oomBumpUpRatio float64,
+	oomMinBumpUp float64,
+	useLinearCpuHistogram bool,
+	linearCpuHistogramMaxValue float64,
+	linearCpuHistogramBucketSize float64) *AggregationsConfig {
 	a := &AggregationsConfig{
 		MemoryAggregationInterval:      memoryAggregationInterval,
 		MemoryAggregationIntervalCount: memoryAggregationIntervalCount,
@@ -121,7 +148,10 @@ func NewAggregationsConfig(memoryAggregationInterval time.Duration, memoryAggreg
 		OOMBumpUpRatio:                 oomBumpUpRatio,
 		OOMMinBumpUp:                   oomMinBumpUp,
 	}
-	a.CPUHistogramOptions = a.cpuHistogramOptions()
+	a.CPUHistogramOptions = a.cpuHistogramOptions(
+		useLinearCpuHistogram,
+		linearCpuHistogramMaxValue,
+		linearCpuHistogramBucketSize)
 	a.MemoryHistogramOptions = a.memoryHistogramOptions()
 	return a
 }
@@ -131,7 +161,16 @@ var aggregationsConfig *AggregationsConfig
 // GetAggregationsConfig gets the aggregations config. Initializes to default values if not initialized already.
 func GetAggregationsConfig() *AggregationsConfig {
 	if aggregationsConfig == nil {
-		aggregationsConfig = NewAggregationsConfig(DefaultMemoryAggregationInterval, DefaultMemoryAggregationIntervalCount, DefaultMemoryHistogramDecayHalfLife, DefaultCPUHistogramDecayHalfLife, DefaultOOMBumpUpRatio, DefaultOOMMinBumpUp)
+		aggregationsConfig = NewAggregationsConfig(
+			DefaultMemoryAggregationInterval,
+			DefaultMemoryAggregationIntervalCount,
+			DefaultMemoryHistogramDecayHalfLife,
+			DefaultCPUHistogramDecayHalfLife,
+			DefaultOOMBumpUpRatio,
+			DefaultOOMMinBumpUp,
+			DefaultUseLinearCPUHistogram,
+			DefaultLinearCPUHistogramMaxValue,
+			DefaultLinearCpuHistogramBucketSize)
 	}
 
 	return aggregationsConfig
